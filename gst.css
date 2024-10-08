@@ -1,0 +1,15 @@
+.reveal .slide-background-content {
+    background-image: url('gstreamer.svg'), url('centricular.svg');
+    background-size: 20%, 25%;
+    background-repeat: no-repeat;
+    background-position: 7% 96%, 90% 96%;
+}
+
+.reveal p {
+    text-align: left;
+}
+
+p.date {
+    text-align: center;
+}
+

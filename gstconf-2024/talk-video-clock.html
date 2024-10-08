@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>GStreamer and display clock synchronization</title>
+<meta name="author" content="Jochen Henneberg"/>
+<meta name="description" content=""/>
+<meta name="keywords" content=""/>
+<style type="text/css">
+.underline { text-decoration: underline; }
+</style>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js/dist/reveal.css"/>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/reveal.js/dist/theme/solarized.css" id="theme"/>
+
+<link rel="stylesheet" href="../gst.css"/>
+
+<!-- If the query includes 'print-pdf', include the PDF print sheet -->
+<script>
+    if( window.location.search.match( /print-pdf/gi ) ) {
+        var link = document.createElement( 'link' );
+        link.rel = 'stylesheet';
+        link.type = 'text/css';
+        link.href = 'https://cdn.jsdelivr.net/npm/reveal.js/css/print/pdf.css';
+        document.getElementsByTagName( 'head' )[0].appendChild( link );
+    }
+</script>
+</head>
+<body>
+<div class="reveal">
+<div class="slides">
+<section id="sec-title-slide"><h1 class="title">GStreamer and display clock synchronization</h1><p class="subtitle"></p>
+<h2 class="author">Jochen Henneberg</h2>
+</section>
+
+<section>
+<section id="slide-orgce37276">
+<h2 id="orgce37276">About</h2>
+<ul>
+<li>Clocks</li>
+<li>GStreamer pipelines and the clock</li>
+<li>GstBaseSink / GstAudioSink</li>
+<li>GstBaseSink / GstVideoSink</li>
+<li>Compositors and their timing requirements</li>
+<li>UI toolkits and their timing requirements</li>
+<li>Thoughts</li>
+<li>Questions?</li>
+
+</ul>
+
+</section>
+</section>
+<section>
+<section id="slide-org4e0630c">
+<h2 id="org4e0630c">Clocks</h2>
+<ul>
+<li>Oscillator.</li>
+<li>Frequency / Phase.</li>
+<li>Reference speed [s].</li>
+<li>Typically samples in/out voltage/current, protocol frames, bytes.</li>
+<li>Speed incorrect / drifts (temperature, oscillator quality,
+dividers).</li>
+<li>Clocks may not have a precise frequency but be event driver.</li>
+
+</ul>
+
+</section>
+</section>
+<section>
+<section id="slide-org26f1809">
+<h2 id="org26f1809">GStreamer pipelines and the clock</h2>
+<ul>
+<li>Only one clock per pipeline.</li>
+<li>System clock, PTP, NTP, audio codec oscillator.</li>
+<li>Buffer PTS determines moment when GstBaseSink forwards the buffer.</li>
+<li>Latency adjust makes sure that the buffer is not too late due to
+processing time.</li>
+<li>Sink will wait on the clock to present the buffer.</li>
+<li>Audio vs. video (double samples audible but not necesarily
+visible).</li>
+
+</ul>
+
+</section>
+</section>
+<section>
+<section id="slide-org17358d2">
+<h2 id="org17358d2">GstBaseSink / GstAudioSink</h2>
+<ul>
+<li>Provides the pipeline with a clock (maybe).</li>
+<li>Gives the audio sample frequency.</li>
+<li>Provides a clock boundary to adjust to pipeline clock if needed.</li>
+<li>That way audio pre-processing can be more efficient if
+e. g. resample happens before equalization.</li>
+
+</ul>
+
+</section>
+</section>
+<section>
+<section id="slide-orgf3d23df">
+<h2 id="orgf3d23df">GstBaseSink / GstVideoSink</h2>
+<ul>
+<li>Display output have a clock which is the refresh rate of the display.</li>
+<li>Doesn't provide a clock.</li>
+<li>Doesn't provide the pipeline with sample frequency.</li>
+<li>Doesn't provide a clock boundary to adjust to pipeline clock if needed.</li>
+
+</ul>
+
+</section>
+<section id="slide-org5333df7">
+<h3 id="org5333df7">GstBaseSink / GstVideoSink - processing deadline and max. lateness</h3>
+<ul>
+<li>PTS + latency</li>
+<li><p>
+GstBaseSink processing deadline:
+</p>
+<pre  class="example" >
+#define DEFAULT_PROCESSING_DEADLINE (20 * GST_MSECOND)
+</pre></li>
+<li><p>
+GstVideoSink processing deadline:
+</p>
+<pre  class="example" >
+/* 20ms is more than enough, 80-130ms is noticeable */
+gst_base_sink_set_processing_deadline (GST_BASE_SINK (videosink),
+    15 * GST_MSECOND);
+gst_base_sink_set_max_lateness (GST_BASE_SINK (videosink),
+    5 * GST_MSECOND);
+</pre></li>
+
+</ul>
+
+</section>
+<section id="slide-orgcda2a2b">
+<h3 id="orgcda2a2b">GstBaseSink / GstVideoSink - wait</h3>
+<ul>
+<li>GstBaseSink will wait until compensated PTS is reached:</li>
+
+</ul>
+<pre  class="example" >
+/* compensate for latency, ts_offset and render delay */
+stime = gst_base_sink_adjust_time (sink, time);
+
+/* wait for the clock, this can be interrupted because we
+   got shut down or we PAUSED. */
+status = gst_base_sink_wait_clock (sink, stime, jitter);
+</pre>
+
+</section>
+</section>
+<section>
+<section id="slide-org995e9c3">
+<h2 id="org995e9c3">Compositors and their timing requirements</h2>
+<ul>
+<li>Wayland (commit window, compositing window)</li>
+<li>SurfaceFlinger + HWC (Android) - VSYNC, Frame pacing</li>
+
+</ul>
+
+</section>
+<section id="slide-org86175a1">
+<h3 id="org86175a1">What has been done</h3>
+<ul>
+<li>For Wayland (gtk)waylandsink has been patched to not drop so many
+buffers anymore (Damian Hobson-Garcia).</li>
+
+</ul>
+
+<p>
+It doesn't make sure that the buffer is ready for the commit window
+which is right before the render timestamp.
+</p>
+
+</section>
+<section id="slide-orgec9a19f">
+<h3 id="orgec9a19f">What is missing</h3>
+<ul>
+<li>Get the perfect moment to submit buffer for rendering.</li>
+<li>Adjust the GstVideoSink such that it provides the buffer early
+enough to get all pre-processing done and commit the buffer on the
+commit window right before the target compositing window.</li>
+<li>Continuously adjust since the video output clock may drift.</li>
+<li>Make sure that we are always 'late'.</li>
+<li>Find a solution for variable display refresh rates.</li>
+
+</ul>
+
+</section>
+<section id="slide-org8663e30">
+<h3 id="org8663e30">Example: Wayland</h3>
+<ul>
+<li>Frame redraw callback.</li>
+<li><a href="https://wayland.app/protocols/presentation-time">wp-presentation</a> Allows to build a GstClock based upon the video
+output.</li>
+<li><a href="https://gitlab.freedesktop.org/wayland/wayland-protocols/-/merge_requests/248/diffs?commit_id=4bd6b28145893b5c92ea7908bcf06c6c77b97924">commit-timing-v1</a> open MR.</li>
+
+</ul>
+
+</section>
+</section>
+<section>
+<section id="slide-orgd0b1999">
+<h2 id="orgd0b1999">UI toolkits and their timing requirements</h2>
+<ul>
+<li><a href="https://www.qt.io/">Qt</a></li>
+<li><a href="https://flutter.dev/">Flutter</a></li>
+<li><a href="https://slint.dev/">Slint</a></li>
+
+</ul>
+
+</section>
+<section id="slide-org8a1df2c">
+<h3 id="org8a1df2c">Example: Qt (qml6glsink)</h3>
+<ul>
+<li>The qml6glsink receives the buffer when it should be rendered.</li>
+<li>The sink then sets the buffer on the <code>widget</code> property
+(<code>QQuickItem</code>) which calls <code>update()</code> asynchronously
+(<code>Qt::QueuedConnection</code>) to signal the request for an update.</li>
+<li>The render loop calls <code>updatePaintNode()</code> when it's time to
+prepare for the UI update.</li>
+
+</ul>
+
+</section>
+<section id="slide-orgd5c3f8c">
+<h3 id="orgd5c3f8c">Conclusion</h3>
+<ul>
+<li>The moment where the frame leaves GstBaseSink and the moment when
+Qt renders the frame are unrelated.</li>
+
+</ul>
+
+</section>
+<section id="slide-orga281393">
+<h3 id="orga281393">What is missing</h3>
+<ul>
+<li>Same issues as for compositor sinks.</li>
+<li>Rendering may not complete within a VSYNC cycle (QOS) and/or clock
+adjust.</li>
+
+</ul>
+
+</section>
+<section id="slide-orgff85efd">
+<h3 id="orgff85efd">What is missing 2</h3>
+<p>
+These are probably nice to have in order to use better/faster
+scaling than what the toolkit can do for us or to drop buffers early
+before post-processing happens.
+</p>
+
+<ul>
+<li>Provide sink expected/real sample rate back to pipeline? Here the
+only relevant case is where the sink rate is lower than the source
+rate, otherwise the current buffer will just be re-displayed.</li>
+<li>Provide sink size back to the pipeline for efficient scaling?</li>
+
+</ul>
+
+</section>
+</section>
+<section>
+<section id="slide-orgfea01b3">
+<h2 id="orgfea01b3">Thoughts</h2>
+<ul>
+<li>Requirements for compositor sync'ed playback and UI toolkit
+sync'ed are similar (no surprise).</li>
+<li>Having a video base class that could either provide a clock or
+translate between the pipeline clock and the video clock similar
+to what to audio sink does.</li>
+<li>Getting feedback from widgets about render updates back to sink.</li>
+<li>Let the base class adjust buffer render()/show_frame() time
+according to feedback from the sink.</li>
+
+</ul>
+
+</section>
+</section>
+<section>
+<section id="slide-org7a4546c">
+<h2 id="org7a4546c">Questions?</h2>
+</section>
+</section>
+</div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/reveal.js/dist/reveal.js"></script>
+
+<script>
+// Full list of configuration options available here:
+// https://github.com/hakimel/reveal.js#configuration
+Reveal.initialize({
+width:1200, height:800,
+
+// Optional libraries used to extend on reveal.js
+dependencies: [
+ { src: 'https://cdn.jsdelivr.net/npm/reveal.js/plugin/markdown/marked.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+ { src: 'https://cdn.jsdelivr.net/npm/reveal.js/plugin/markdown/markdown.js', condition: function() { return !!document.querySelector( '[data-markdown]' ); } },
+ { src: 'https://cdn.jsdelivr.net/npm/reveal.js/plugin/zoom-js/zoom.js', async: true, condition: function() { return !!document.body.classList; } },
+ { src: 'https://cdn.jsdelivr.net/npm/reveal.js/plugin/notes/notes.js', async: true, condition: function() { return !!document.body.classList; } }]
+
+});
+
+</script>
+</body>
+</html>

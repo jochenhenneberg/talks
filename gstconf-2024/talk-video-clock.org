@@ -1,0 +1,152 @@
+#+Title: GStreamer and display clock synchronization
+#+Author: Jochen Henneberg
+#+Email: jochen@centricular.com
+
+#+REVEAL_ROOT: https://cdn.jsdelivr.net/npm/reveal.js
+#+REVEAL_INIT_OPTIONS: width:1200, height:800
+#+REVEAL_HLEVEL: 1
+#+REVEAL_THEME: solarized
+#+ATTR_REVEAL: :frag (appear)
+#+REVEAL_MARGIN: 0.05
+#+REVEAL_MAX_SCALE: 5.0
+#+REVEAL_EXTRA_CSS: ../gst.css
+#+REVEAL_TRANS: fade
+#+OPTIONS: ^:nil toc:nil num:nil reveal_control:nil timestamp:nil
+
+* About
+  * Clocks
+  * GStreamer pipelines and the clock
+  * GstBaseSink / GstAudioSink
+  * GstBaseSink / GstVideoSink
+  * Compositors and their timing requirements
+  * UI toolkits and their timing requirements
+  * Thoughts
+  * Questions?
+
+* Clocks
+  * Oscillator.
+  * Frequency / Phase.
+  * Reference speed [s].
+  * Typically samples in/out voltage/current, protocol frames, bytes.
+  * Speed incorrect / drifts (temperature, oscillator quality,
+    dividers).
+  * Clocks may not have a precise frequency but be event driver.
+
+* GStreamer pipelines and the clock
+  * Only one clock per pipeline.
+  * System clock, PTP, NTP, audio codec oscillator.
+  * Buffer PTS determines moment when GstBaseSink forwards the buffer.
+  * Latency adjust makes sure that the buffer is not too late due to
+    processing time.
+  * Sink will wait on the clock to present the buffer.
+  * Audio vs. video (double samples audible but not necesarily
+    visible).
+
+* GstBaseSink / GstAudioSink
+  * Provides the pipeline with a clock (maybe).
+  * Gives the audio sample frequency.
+  * Provides a clock boundary to adjust to pipeline clock if needed.
+  * That way audio pre-processing can be more efficient if
+    e. g. resample happens before equalization.
+
+* GstBaseSink / GstVideoSink
+  * Display output have a clock which is the refresh rate of the display.
+  * Doesn't provide a clock.
+  * Doesn't provide the pipeline with sample frequency.
+  * Doesn't provide a clock boundary to adjust to pipeline clock if needed.
+
+** GstBaseSink / GstVideoSink - processing deadline and max. lateness
+  * PTS + latency
+  * GstBaseSink processing deadline:
+    #+BEGIN_SRC
+    #define DEFAULT_PROCESSING_DEADLINE (20 * GST_MSECOND)
+    #+END_SRC
+  * GstVideoSink processing deadline:
+    #+BEGIN_SRC
+      /* 20ms is more than enough, 80-130ms is noticeable */
+      gst_base_sink_set_processing_deadline (GST_BASE_SINK (videosink),
+          15 * GST_MSECOND);
+      gst_base_sink_set_max_lateness (GST_BASE_SINK (videosink),
+          5 * GST_MSECOND);
+    #+END_SRC
+
+** GstBaseSink / GstVideoSink - wait
+  * GstBaseSink will wait until compensated PTS is reached:
+  #+BEGIN_SRC
+  /* compensate for latency, ts_offset and render delay */
+  stime = gst_base_sink_adjust_time (sink, time);
+
+  /* wait for the clock, this can be interrupted because we
+     got shut down or we PAUSED. */
+  status = gst_base_sink_wait_clock (sink, stime, jitter);
+  #+END_SRC
+
+* Compositors and their timing requirements
+  * Wayland (commit window, compositing window)
+  * SurfaceFlinger + HWC (Android) - VSYNC, Frame pacing
+
+** What has been done
+  * For Wayland (gtk)waylandsink has been patched to not drop so many
+    buffers anymore (Damian Hobson-Garcia).
+
+  It doesn't make sure that the buffer is ready for the commit window
+  which is right before the render timestamp.
+
+** What is missing
+  * Get the perfect moment to submit buffer for rendering.
+  * Adjust the GstVideoSink such that it provides the buffer early
+    enough to get all pre-processing done and commit the buffer on the
+    commit window right before the target compositing window.
+  * Continuously adjust since the video output clock may drift.
+  * Make sure that we are always 'late'.
+  * Find a solution for variable display refresh rates.
+
+** Example: Wayland
+  * Frame redraw callback.
+  * [[https://wayland.app/protocols/presentation-time][wp-presentation]] Allows to build a GstClock based upon the video
+    output.
+  * [[https://gitlab.freedesktop.org/wayland/wayland-protocols/-/merge_requests/248/diffs?commit_id=4bd6b28145893b5c92ea7908bcf06c6c77b97924][commit-timing-v1]] open MR.
+
+* UI toolkits and their timing requirements
+  * [[https://www.qt.io/][Qt]]
+  * [[https://flutter.dev/][Flutter]]
+  * [[https://slint.dev/][Slint]]
+
+** Example: Qt (qml6glsink)
+  * The qml6glsink receives the buffer when it should be rendered.
+  * The sink then sets the buffer on the ~widget~ property
+    (~QQuickItem~) which calls ~update()~ asynchronously
+    (~Qt::QueuedConnection~) to signal the request for an update.
+  * The render loop calls ~updatePaintNode()~ when it's time to
+    prepare for the UI update.
+  
+** Conclusion
+  * The moment where the frame leaves GstBaseSink and the moment when
+    Qt renders the frame are unrelated.
+
+** What is missing
+  * Same issues as for compositor sinks.
+  * Rendering may not complete within a VSYNC cycle (QOS) and/or clock
+    adjust.
+
+** What is missing 2
+  These are probably nice to have in order to use better/faster
+  scaling than what the toolkit can do for us or to drop buffers early
+  before post-processing happens.
+  
+  * Provide sink expected/real sample rate back to pipeline? Here the
+    only relevant case is where the sink rate is lower than the source
+    rate, otherwise the current buffer will just be re-displayed.
+  * Provide sink size back to the pipeline for efficient scaling?
+
+* Thoughts
+  * Requirements for compositor sync'ed playback and UI toolkit
+    sync'ed are similar (no surprise).
+  * Having a video base class that could either provide a clock or
+    translate between the pipeline clock and the video clock similar
+    to what to audio sink does.
+  * Getting feedback from widgets about render updates back to sink.
+  * Let the base class adjust buffer render()/show_frame() time
+    according to feedback from the sink.
+
+* Questions?
